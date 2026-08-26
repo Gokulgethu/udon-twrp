@@ -1,0 +1,137 @@
+name: Build TWRP for udon
+
+on:
+  workflow_dispatch:
+    inputs:
+      twrp_branch:
+        description: 'minimal-manifest-twrp branch to build with'
+        required: true
+        default: 'twrp-12.1'
+        type: choice
+        options:
+          - 'twrp-12.1'
+          - 'twrp-14'
+          - 'twrp-14.1'
+      device_tree_repo:
+        description: 'Device tree repository (owner/repo)'
+        required: true
+        default: 'Gokulgethu/udon'
+      device_tree_branch:
+        description: 'Device tree branch'
+        required: true
+        default: 'main'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: udon-twrp
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: TWRP recovery — OnePlus 11R (udon)
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Runner specs
+        run: |
+          echo "vCPU: $(nproc)"
+          free -h | sed -n '2p'
+          df -h / | sed -n '2p'
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/lib/jvm /opt/pipx \
+            /usr/local/swift /usr/share/swift 2>/dev/null || true
+          df -h /
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git git-lfs git-core gnupg flex bison build-essential \
+            zip unzip curl wget rsync libssl-dev libncurses-dev zlib1g-dev libc6-dev-i386 \
+            lib32z1 lib32ncurses6 python3 ccache || \
+          sudo apt-get install -y -qq git git-lfs git-core gnupg flex bison build-essential \
+            zip unzip curl wget rsync libssl-dev libncurses-dev zlib1g-dev python3 ccache
+
+      - name: Configure repo tool and git identity
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > "$HOME/bin/repo"
+          chmod a+x "$HOME/bin/repo"
+          sudo ln -sf "$HOME/bin/repo" /usr/bin/repo
+          git config --global user.name "Gokulgethu"
+          git config --global user.email "132586253+Gokulgethu@users.noreply.github.com"
+          repo version
+
+      - name: Initialize TWRP source
+        run: |
+          mkdir -p twrp && cd twrp
+          repo init -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp \
+            -b ${{ inputs.twrp_branch }} --depth=1 --git-lfs
+
+      - name: Add udon device tree
+        run: |
+          cd twrp
+          OWNER=$(cut -d/ -f1 <<< "${{ inputs.device_tree_repo }}")
+          mkdir -p .repo/local_manifests
+          cat > .repo/local_manifests/udon.xml <<XMLEOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <manifest>
+            <remote name="gh" fetch="https://github.com/$OWNER" revision="${{ inputs.device_tree_branch }}" />
+            <project path="device/oneplus/udon" name="$(cut -d/ -f2 <<< '${{ inputs.device_tree_repo }}')" remote="gh" />
+          </manifest>
+          XMLEOF
+          cat .repo/local_manifests/udon.xml
+
+      - name: Sync sources (~1061 repos, shallow)
+        run: |
+          cd twrp
+          repo sync -c --no-clone-bundles --no-tags --optimized-fetch --prune -j8
+          df -h /
+          du -sh .repo
+
+      - name: Build TWRP recovery image
+        run: |
+          cd twrp
+          export ALLOW_MISSING_DEPENDENCIES=true
+          source build/envsetup.sh
+          lunch twrp_udon-eng
+          mka recoveryimage -j"$(nproc)"
+
+      - name: Verify and collect output
+        run: |
+          ls -lh twrp/out/target/product/udon/recovery.img
+          cp twrp/out/target/product/udon/recovery.img ./twrp-udon.img
+          sha256sum twrp-udon.img > twrp-udon.img.sha256
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: twrp-udon-${{ github.run_number }}
+          path: |
+            twrp-udon.img
+            twrp-udon.img.sha256
+          if-no-files-found: warn
+
+      - name: Create GitHub release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: twrp-${{ github.run_number }}
+          name: TWRP for OnePlus 11R (udon) build ${{ github.run_number }}
+          body: |
+            TWRP recovery for OnePlus 11R (udon / CPH2487):
+
+            - Base: minimal-manifest-twrp @ ${{ inputs.twrp_branch }}
+            - Device tree: ${{ inputs.device_tree_repo }} @ ${{ inputs.device_tree_branch }} (forked from shadowjynxs/udon)
+            - Prebuilt kernel/dtb/dtbo from the device tree
+
+            Flash: `fastboot flash recovery_a twrp-udon.img` (or recovery_b), then boot straight to recovery.
+          files: |
+            twrp-udon.img
+            twrp-udon.img.sha256
+          make_latest: true
