@@ -89,7 +89,7 @@ jobs:
       - name: Sync sources (~1061 repos, shallow)
         run: |
           cd twrp
-          repo sync -c --no-clone-bundles --no-tags --optimized-fetch --prune -j8
+          repo sync -c --no-tags --prune -j8
           df -h /
           du -sh .repo
 
